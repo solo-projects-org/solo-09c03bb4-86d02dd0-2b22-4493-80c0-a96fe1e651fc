@@ -24,6 +24,9 @@ services:
     build: ./app
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/settlement
+      # 锁等待采样周期与单次限时（毫秒）；演示时可调快观察响应
+      LOCK_SAMPLE_INTERVAL_MS: "1000"
+      LOCK_SAMPLE_TIMEOUT_MS: "3000"
     depends_on:
       db:
         condition: service_healthy

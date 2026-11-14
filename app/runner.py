@@ -6,7 +6,9 @@
   共享同一快照，期间其他连接照常写入也不影响本批；
 - 每次执行由服务端 statement_timeout=10s 限时，另有客户端兜底超时；
 - 取消通过 pg_cancel_backend 让正在执行的 SQL 真正停下来；
-- 名额在本批 SQL 实际停止、事务结束、连接关闭之后才释放。
+- 名额在本批 SQL 实际停止、事务结束、连接关闭之后才释放；
+- 运行期间由独立的 LockMonitor 采样锁等待，采样连接与限时和本执行器隔离，
+  采样失败不影响对照、取消与名额释放。
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import time
 
 import asyncpg
 
+from lockmonitor import LockMonitor
 from plans import build_conclusion, plan_structure
 from store import Batch, BatchStore, Execution
 
@@ -38,9 +41,10 @@ class _Timeout(Exception):
 
 
 class BatchRunner:
-    def __init__(self, dsn: str, store: BatchStore):
+    def __init__(self, dsn: str, store: BatchStore, monitor: LockMonitor):
         self._dsn = dsn
         self._store = store
+        self._monitor = monitor
         self.busy = False
         self.current_batch_id: str | None = None
         self.backend_pid: int | None = None
@@ -67,11 +71,20 @@ class BatchRunner:
 
     async def _run(self, batch: Batch) -> None:
         conn: asyncpg.Connection | None = None
+        # 先启动锁等待采样：建连、等待事务快照、执行 SQL 的全过程都要能观察。
+        # 采样任务不阻塞本流程，任何采样异常都由它自己吞掉并记录。
+        self._monitor.begin(batch)
         try:
             batch.status = "running"
             batch.started_at = time.time()
             conn = await asyncpg.connect(self._dsn)
             self.backend_pid = await conn.fetchval("SELECT pg_backend_pid()")
+            batch.backend_pid = self.backend_pid
+            started = await conn.fetchval(
+                "SELECT backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()"
+            )
+            # 与采样器里的时间表示保持一致（ISO 8601），供 PID 复用核对。
+            batch.backend_start = started.isoformat() if started else None
 
             # 同一可重复读只读事务：四次执行共享同一快照
             await conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -106,6 +119,9 @@ class BatchRunner:
             batch.status = "failed"
             batch.error = f"{type(exc).__name__}: {exc}"
         finally:
+            # 先停止采样：迟到样本不得覆盖已经确认的链；停止本身不等采样任务
+            # 结束（采样连接有自己的限时），也不影响下面释放名额的顺序。
+            self._monitor.stop(batch.id, batch.status)
             # 关键顺序：先等本批 SQL 停止、事务结束、连接关闭，再释放运行名额
             if conn is not None:
                 try:

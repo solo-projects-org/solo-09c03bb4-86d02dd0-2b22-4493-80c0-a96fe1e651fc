@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from lockmonitor import LockMonitor, summarize_state
 from plans import structure_lines
 from runner import BatchRunner
 from sqlcheck import validate_select_sql
@@ -24,7 +25,8 @@ DATABASE_URL = os.environ.get(
 )
 
 store = BatchStore(capacity=50)
-runner = BatchRunner(DATABASE_URL, store)
+monitor = LockMonitor(DATABASE_URL)
+runner = BatchRunner(DATABASE_URL, store, monitor)
 pool: asyncpg.Pool | None = None
 
 
@@ -42,6 +44,7 @@ async def lifespan(app: FastAPI):
     if pool is None:
         raise RuntimeError(f"无法连接数据库: {last_exc}")
     yield
+    await monitor.shutdown()
     await pool.close()
 
 
@@ -73,7 +76,10 @@ async def list_batches():
     return {
         "busy": runner.busy,
         "current_batch_id": runner.current_batch_id,
-        "batches": [b.to_dict() for b in store.list()],
+        "batches": [
+            {**b.to_dict(), "lock_monitor": summarize_state(b.lock_monitor)}
+            for b in store.list()
+        ],
     }
 
 
@@ -87,6 +93,35 @@ async def get_batch(batch_id: str):
         if ex.plan_structure is not None:
             ex_dict["structure_lines"] = structure_lines(ex.plan_structure)
     return data
+
+
+@app.get("/api/batches/{batch_id}/locks")
+async def get_batch_locks(batch_id: str):
+    """该批次的锁等待观察结果：最近一次采样 + 最后一次确认的链。
+
+    ``last_sample.ok == false`` 表示采样失败——状态是「无法确认」，
+    不会返回「无阻塞」。批次结束/超时/取消后，状态里会带 stopped_at 与
+    stop_reason，网页据此把 ``last_confirmed`` 标成历史观察。
+    """
+    batch = store.get(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    state = monitor.state_for(batch_id)  # 不在运行的批次也可能保留观察结果
+    if state is None:
+        return {
+            "batch_id": batch.id,
+            "status": batch.status,
+            "backend_pid": batch.backend_pid,
+            "backend_start": batch.backend_start,
+            "monitor": None,
+        }
+    return {
+        "batch_id": batch.id,
+        "status": batch.status,
+        "backend_pid": batch.backend_pid,
+        "backend_start": batch.backend_start,
+        "monitor": state,
+    }
 
 
 @app.post("/api/batches/{batch_id}/cancel")

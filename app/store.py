@@ -54,6 +54,9 @@ class Batch:
     finished_at: float | None = None
     executions: list[Execution] = field(default_factory=list)
     conclusion: dict | None = None
+    backend_pid: int | None = None          # 对照事务所在会话的 PID
+    backend_start: str | None = None        # 该会话的启动时间，PID 核对用
+    lock_monitor: dict | None = None        # 锁等待观察器状态（见 lockmonitor）
 
     def to_dict(self, include_plans: bool = False) -> dict:
         return {
@@ -65,6 +68,8 @@ class Batch:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "backend_pid": self.backend_pid,
+            "backend_start": self.backend_start,
             "executions": [e.to_dict(include_plan=include_plans) for e in self.executions],
             "conclusion": self.conclusion,
         }

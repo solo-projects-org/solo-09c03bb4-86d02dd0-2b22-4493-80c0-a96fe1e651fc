@@ -19,6 +19,7 @@
       <b>默认 → 关闭 NestLoop → 关闭 NestLoop → 默认</b>（第二轮颠倒顺序）各执行一次
       <code>EXPLAIN (ANALYZE, FORMAT JSON)</code>，共 4 次、共享同一快照；
       单次执行限时 10 秒；同时只运行一批，满额会提示繁忙。
+      运行中可在下方「锁等待观察」里分清是计划慢还是表锁阻塞。
     </p>
     <div class="row">
       <label for="preset" class="hint">预设样例：</label>
@@ -43,6 +44,21 @@
     <div class="row">
       <button id="insert-btn">向 settlement_orders 补记一行</button>
       <span id="insert-msg" class="msg"></span>
+    </div>
+  </section>
+
+  <section class="card monitor-card">
+    <h2>锁等待观察 <span id="lock-focus" class="hint"></span></h2>
+    <p class="hint">
+      批次运行期间由<b>独立采样连接</b>每 <span id="lock-interval">1</span> 秒读取
+      <code>pg_locks</code> 与 <code>pg_stat_activity</code>，沿 <code>pg_blocking_pids()</code>
+      向上追踪阻塞会话链，显示等待对象、阻塞方 PID 和 SQL 摘要；阻塞方自己也在等待时继续向上，
+      直到锁持有者。每个 PID 都会用<b>会话启动时间</b>核对：会话已退出、PID 被复用或链条断开时
+      标为<b>无法确认</b>，不会把旧会话当作当前阻塞方。批次超时/取消/结束后保留最后一次确认的链
+      并标注为历史观察；采样失败只表示状态未知，<b>不等于「无阻塞」</b>。
+    </p>
+    <div id="lock-panel" class="lock-panel">
+      <p class="hint">暂无观察数据</p>
     </div>
   </section>
 
